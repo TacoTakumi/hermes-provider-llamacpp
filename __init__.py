@@ -19,6 +19,11 @@ from providers.base import ProviderProfile
 class LlamaCppProfile(ProviderProfile):
     """llama.cpp servers, bare or behind llama-swap."""
 
+    # Custom-provider entries named llamacpp / llama-swap activate this
+    # profile: providers.resolve_provider_profile does its requested-first
+    # lookup only for profiles carrying this opt-in.
+    activates_on_requested_provider = True
+
 
 llamacpp = LlamaCppProfile(
     name="llamacpp",
