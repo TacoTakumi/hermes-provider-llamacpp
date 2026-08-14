@@ -13,6 +13,7 @@ reasoning-control emission, and discovery hooks land in later tasks.
 """
 
 import logging
+import re
 from typing import Any
 
 from providers import register_provider
@@ -64,13 +65,9 @@ def _clamp_effort(effort: str, caps) -> str | None:
 _RESERVED_TEMPLATE_KWARGS = ("reasoning_effort", "enable_thinking")
 
 
-def _config_template_kwargs(
-    base_url: str | None, model: str | None
-) -> dict[str, Any]:
-    """Per-model chat_template_kwargs declared in hermes config.
-
-    Config surface: the per-model metadata dict inside a provider entry's
-    ``models`` mapping -
+def _model_entry_meta(base_url: str | None, model: str | None) -> dict[str, Any]:
+    """The per-model metadata dict inside a provider entry's ``models``
+    mapping, {} when there is none -
 
         providers:
           llamacpp:
@@ -78,13 +75,14 @@ def _config_template_kwargs(
             models:
               qwen38-27b-mtp-q8:
                 chat_template_kwargs: {my_template_var: true}
+                reasoning_budget_tokens: 4096
               gemma-4-27b: {}
 
     (the legacy ``custom_providers`` list form, including
     ``models: [{id: ..., chat_template_kwargs: {...}}]`` rows, normalizes
     to the same shape). The entry is matched by base_url, the model by
-    its catalog key, both case-insensitive. Returns {} when unset or the
-    hermes config machinery is unavailable.
+    its catalog key, both case-insensitive. Never mutate the result - it
+    may alias load_config_readonly()'s shared cache.
     """
     if not base_url or not model:
         return {}
@@ -96,7 +94,7 @@ def _config_template_kwargs(
 
         entries = get_compatible_custom_providers(load_config_readonly())
     except Exception as exc:
-        logger.debug("llamacpp: config passthrough lookup failed: %s", exc)
+        logger.debug("llamacpp: config lookup failed: %s", exc)
         return {}
     target = str(base_url).strip().rstrip("/").lower()
     model_norm = str(model).strip().lower()
@@ -112,12 +110,74 @@ def _config_template_kwargs(
         for model_id, meta in models.items():
             if str(model_id).strip().lower() != model_norm:
                 continue
-            kwargs = (
-                meta.get("chat_template_kwargs") if isinstance(meta, dict) else None
-            )
-            # copy: the entry may alias load_config_readonly()'s shared cache
-            return dict(kwargs) if isinstance(kwargs, dict) else {}
+            return meta if isinstance(meta, dict) else {}
     return {}
+
+
+def _agent_config() -> dict[str, Any]:
+    """The hermes config's agent section, {} when unavailable."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
+    except Exception as exc:
+        logger.debug("llamacpp: hermes config unavailable: %s", exc)
+        return {}
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+    return agent_cfg if isinstance(agent_cfg, dict) else {}
+
+
+def _config_template_kwargs(
+    base_url: str | None, model: str | None
+) -> dict[str, Any]:
+    """Per-model chat_template_kwargs declared in hermes config.
+
+    See _model_entry_meta for the config surface. Returns {} when unset
+    or the hermes config machinery is unavailable.
+    """
+    kwargs = _model_entry_meta(base_url, model).get("chat_template_kwargs")
+    # copy: the entry may alias load_config_readonly()'s shared cache
+    return dict(kwargs) if isinstance(kwargs, dict) else {}
+
+
+_REASONING_BUDGET_MIN_BUILD = 8287
+"""llama.cpp build that added the per-request reasoning_budget_tokens
+field (#20297, commit acb7c790, 2026-03-11). Older servers may reject
+unknown request fields, so emission is gated on /props build_info."""
+
+
+def _props_build_number(props: dict | None) -> int | None:
+    """Parse the numeric build out of /props build_info ('b10433-9b0...')."""
+    if not isinstance(props, dict):
+        return None
+    m = re.match(r"b?(\d+)\b", str(props.get("build_info") or ""))
+    return int(m.group(1)) if m else None
+
+
+def _config_reasoning_budget(
+    base_url: str | None, model: str | None
+) -> int | None:
+    """Resolved reasoning_budget_tokens for *model*.
+
+    The per-model metadata value wins over the session-wide
+    ``agent.reasoning_budget_tokens``; -1 passes verbatim (server
+    semantics: explicitly disabled, beating any launch-flag default).
+    An invalid per-model value disables the budget for that model rather
+    than falling back to the session value.
+    """
+    raw = _model_entry_meta(base_url, model).get("reasoning_budget_tokens")
+    if raw is None:
+        raw = _agent_config().get("reasoning_budget_tokens")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < -1:
+        logger.warning(
+            "llamacpp: ignoring invalid reasoning_budget_tokens %r "
+            "(want an integer >= -1)",
+            raw,
+        )
+        return None
+    return raw
 
 
 class LlamaCppProfile(ProviderProfile):
@@ -146,6 +206,13 @@ class LlamaCppProfile(ProviderProfile):
         BENEATH the reasoning keys computed here: reserved keys in the
         passthrough are dropped, so the template-aware mapping can never
         be bypassed from that channel.
+
+        A configured reasoning budget is emitted as the
+        top-level request field reasoning_budget_tokens (llama-server
+        derives the thinking tags from the chat template server-side),
+        gated on the server build being confirmed >= the build that
+        added the field - a cold llama-swap model or unreachable /props
+        omits it rather than risking a rejected request.
         """
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
@@ -199,9 +266,9 @@ class LlamaCppProfile(ProviderProfile):
                 if wire_effort:
                     mapping["reasoning_effort"] = wire_effort
 
-        passthrough = _config_template_kwargs(
-            context.get("base_url") or self.base_url, context.get("model")
-        )
+        base_url = context.get("base_url") or self.base_url
+        model = context.get("model")
+        passthrough = _config_template_kwargs(base_url, model)
         dropped = [k for k in passthrough if k in _RESERVED_TEMPLATE_KWARGS]
         if dropped:
             logger.warning(
@@ -218,6 +285,27 @@ class LlamaCppProfile(ProviderProfile):
         merged.update(mapping)  # reasoning keys stay on top
         if merged:
             extra_body["chat_template_kwargs"] = merged
+
+        budget = _config_reasoning_budget(base_url, model)
+        if budget is not None:
+            build = None
+            if base_url:
+                try:
+                    from . import probe
+
+                    result = probe.probe_model(base_url, model)
+                    build = _props_build_number(result.props)
+                except Exception as exc:
+                    logger.debug("llamacpp budget probe failed: %s", exc)
+            if build is not None and build >= _REASONING_BUDGET_MIN_BUILD:
+                extra_body["reasoning_budget_tokens"] = budget
+            else:
+                logger.info(
+                    "llamacpp: reasoning_budget_tokens omitted (server "
+                    "build %s not confirmed >= %s)",
+                    build,
+                    _REASONING_BUDGET_MIN_BUILD,
+                )
         return extra_body, top_level
 
     def probe_server_caps(self, *, base_url=None, model=None, timeout=3.0):
