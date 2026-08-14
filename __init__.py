@@ -12,6 +12,8 @@ Skeleton stage: registration and identity only. Server probing,
 reasoning-control emission, and discovery hooks land in later tasks.
 """
 
+from typing import Any
+
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -23,6 +25,29 @@ class LlamaCppProfile(ProviderProfile):
     # profile: providers.resolve_provider_profile does its requested-first
     # lookup only for profiles carrying this opt-in.
     activates_on_requested_provider = True
+
+    def build_api_kwargs_extras(
+        self,
+        *,
+        reasoning_config: dict | None = None,
+        **context: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Route hermes reasoning effort to llama-server's chat template.
+
+        llama-server reads reasoning controls from the request's top-level
+        ``chat_template_kwargs`` (Jinja variables for the served template);
+        the OpenAI SDK merges extra_body into the JSON body top level, so
+        the mapping goes through extra_body, never an OpenAI parameter.
+        Thinking-off (enable_thinking=false) is wired separately.
+        """
+        extra_body: dict[str, Any] = {}
+        top_level: dict[str, Any] = {}
+        if isinstance(reasoning_config, dict):
+            effort = str(reasoning_config.get("effort") or "").strip().lower()
+            enabled = reasoning_config.get("enabled", True)
+            if enabled is not False and effort and effort != "none":
+                extra_body["chat_template_kwargs"] = {"reasoning_effort": effort}
+        return extra_body, top_level
 
     def probe_server_caps(self, *, base_url=None, model=None, timeout=3.0):
         """Detect server kind and served-template capabilities (read-only).
