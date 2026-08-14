@@ -58,6 +58,68 @@ def _clamp_effort(effort: str, caps) -> str | None:
     return min(ranked, key=lambda e: (abs(_EFFORT_RANK[e] - rank), _EFFORT_RANK[e]))
 
 
+# chat_template_kwargs keys the reasoning mapping owns.
+# The per-model passthrough may not set these - reasoning stays governed
+# by agent.reasoning_effort / agent.reasoning_overrides.
+_RESERVED_TEMPLATE_KWARGS = ("reasoning_effort", "enable_thinking")
+
+
+def _config_template_kwargs(
+    base_url: str | None, model: str | None
+) -> dict[str, Any]:
+    """Per-model chat_template_kwargs declared in hermes config.
+
+    Config surface: the per-model metadata dict inside a provider entry's
+    ``models`` mapping -
+
+        providers:
+          llamacpp:
+            api: http://rig:8080/v1
+            models:
+              qwen38-27b-mtp-q8:
+                chat_template_kwargs: {my_template_var: true}
+              gemma-4-27b: {}
+
+    (the legacy ``custom_providers`` list form, including
+    ``models: [{id: ..., chat_template_kwargs: {...}}]`` rows, normalizes
+    to the same shape). The entry is matched by base_url, the model by
+    its catalog key, both case-insensitive. Returns {} when unset or the
+    hermes config machinery is unavailable.
+    """
+    if not base_url or not model:
+        return {}
+    try:
+        from hermes_cli.config import (
+            get_compatible_custom_providers,
+            load_config_readonly,
+        )
+
+        entries = get_compatible_custom_providers(load_config_readonly())
+    except Exception as exc:
+        logger.debug("llamacpp: config passthrough lookup failed: %s", exc)
+        return {}
+    target = str(base_url).strip().rstrip("/").lower()
+    model_norm = str(model).strip().lower()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_url = str(entry.get("base_url") or "").strip().rstrip("/").lower()
+        if entry_url != target:
+            continue
+        models = entry.get("models")
+        if not isinstance(models, dict):
+            continue
+        for model_id, meta in models.items():
+            if str(model_id).strip().lower() != model_norm:
+                continue
+            kwargs = (
+                meta.get("chat_template_kwargs") if isinstance(meta, dict) else None
+            )
+            # copy: the entry may alias load_config_readonly()'s shared cache
+            return dict(kwargs) if isinstance(kwargs, dict) else {}
+    return {}
+
+
 class LlamaCppProfile(ProviderProfile):
     """llama.cpp servers, bare or behind llama-swap."""
 
@@ -79,9 +141,15 @@ class LlamaCppProfile(ProviderProfile):
         the OpenAI SDK merges extra_body into the JSON body top level, so
         the mapping goes through extra_body, never an OpenAI parameter.
         Thinking-off (enable_thinking=false) is wired separately.
+
+        Per-model chat_template_kwargs from hermes config merge
+        BENEATH the reasoning keys computed here: reserved keys in the
+        passthrough are dropped, so the template-aware mapping can never
+        be bypassed from that channel.
         """
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
+        mapping: dict[str, Any] = {}
         if isinstance(reasoning_config, dict):
             effort = str(reasoning_config.get("effort") or "").strip().lower()
             enabled = reasoning_config.get("enabled", True)
@@ -108,9 +176,7 @@ class LlamaCppProfile(ProviderProfile):
                             "llamacpp thinking-off probe failed: %s", exc
                         )
                 if emit_toggle:
-                    extra_body["chat_template_kwargs"] = {
-                        "enable_thinking": False
-                    }
+                    mapping["enable_thinking"] = False
             elif effort:
                 wire_effort: str | None = effort
                 base_url = context.get("base_url") or self.base_url
@@ -131,9 +197,27 @@ class LlamaCppProfile(ProviderProfile):
                         wire_effort if wire_effort else "omitted",
                     )
                 if wire_effort:
-                    extra_body["chat_template_kwargs"] = {
-                        "reasoning_effort": wire_effort
-                    }
+                    mapping["reasoning_effort"] = wire_effort
+
+        passthrough = _config_template_kwargs(
+            context.get("base_url") or self.base_url, context.get("model")
+        )
+        dropped = [k for k in passthrough if k in _RESERVED_TEMPLATE_KWARGS]
+        if dropped:
+            logger.warning(
+                "llamacpp: reasoning keys in per-model chat_template_kwargs "
+                "ignored (%s) - set agent.reasoning_effort / "
+                "agent.reasoning_overrides instead",
+                ", ".join(sorted(dropped)),
+            )
+        merged = {
+            k: v
+            for k, v in passthrough.items()
+            if k not in _RESERVED_TEMPLATE_KWARGS
+        }
+        merged.update(mapping)  # reasoning keys stay on top
+        if merged:
+            extra_body["chat_template_kwargs"] = merged
         return extra_body, top_level
 
     def probe_server_caps(self, *, base_url=None, model=None, timeout=3.0):
