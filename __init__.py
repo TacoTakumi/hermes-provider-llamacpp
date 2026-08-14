@@ -24,6 +24,16 @@ class LlamaCppProfile(ProviderProfile):
     # lookup only for profiles carrying this opt-in.
     activates_on_requested_provider = True
 
+    def probe_server_caps(self, *, base_url=None, model=None, timeout=3.0):
+        """Detect server kind and served-template capabilities (read-only).
+
+        Never dispatches a request that could start a non-resident model
+        on llama-swap - see probe.py for the safety contract.
+        """
+        from . import probe
+
+        return probe.probe_model(base_url or self.base_url, model, timeout=timeout)
+
 
 llamacpp = LlamaCppProfile(
     name="llamacpp",
