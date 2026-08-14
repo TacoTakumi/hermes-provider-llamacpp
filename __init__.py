@@ -85,7 +85,33 @@ class LlamaCppProfile(ProviderProfile):
         if isinstance(reasoning_config, dict):
             effort = str(reasoning_config.get("effort") or "").strip().lower()
             enabled = reasoning_config.get("enabled", True)
-            if enabled is not False and effort and effort != "none":
+            if enabled is False or effort == "none":
+                # Thinking off. enable_thinking must be a JSON boolean - a
+                # string "false" is truthy inside the Jinja template and can
+                # 400 server-side. Omit only when the served template
+                # provably has no toggle; unknown caps still emit (an unused
+                # Jinja var is inert on non-thinking templates).
+                emit_toggle = True
+                base_url = context.get("base_url") or self.base_url
+                if base_url:
+                    try:
+                        from . import probe
+
+                        result = probe.probe_model(base_url, context.get("model"))
+                        if (
+                            result.caps is not None
+                            and not result.caps.supports_thinking_toggle
+                        ):
+                            emit_toggle = False
+                    except Exception as exc:
+                        logger.debug(
+                            "llamacpp thinking-off probe failed: %s", exc
+                        )
+                if emit_toggle:
+                    extra_body["chat_template_kwargs"] = {
+                        "enable_thinking": False
+                    }
+            elif effort:
                 wire_effort: str | None = effort
                 base_url = context.get("base_url") or self.base_url
                 if base_url:
