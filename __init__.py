@@ -12,10 +12,50 @@ Skeleton stage: registration and identity only. Server probing,
 reasoning-control emission, and discovery hooks land in later tasks.
 """
 
+import logging
 from typing import Any
 
 from providers import register_provider
 from providers.base import ProviderProfile
+
+logger = logging.getLogger("providers.llamacpp")
+
+# hermes effort levels in intensity order, for nearest-level clamping
+_EFFORT_RANK = {
+    "none": 0,
+    "minimal": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "xhigh": 5,
+    "max": 6,
+    "ultra": 7,
+}
+
+
+def _clamp_effort(effort: str, caps) -> str | None:
+    """Map a hermes effort level onto what the served template tolerates.
+
+    Returns the wire value, or None to omit the kwarg entirely.
+    caps None (cold/unknown model, bare endpoint without props) keeps the
+    verbatim passthrough - the user's explicit config is honored when the
+    template cannot be inspected.
+    """
+    if caps is None:
+        return effort
+    if not caps.has_reasoning_effort:
+        return None
+    if effort in caps.accepted_efforts:
+        return effort
+    if effort in caps.remapped_efforts:
+        # the template would rewrite it anyway; do it client-side so the
+        # wire always carries a value from the accepted set
+        return caps.remapped_efforts[effort]
+    rank = _EFFORT_RANK.get(effort)
+    ranked = [e for e in caps.accepted_efforts if e in _EFFORT_RANK]
+    if rank is None or not ranked:
+        return None
+    return min(ranked, key=lambda e: (abs(_EFFORT_RANK[e] - rank), _EFFORT_RANK[e]))
 
 
 class LlamaCppProfile(ProviderProfile):
@@ -46,7 +86,28 @@ class LlamaCppProfile(ProviderProfile):
             effort = str(reasoning_config.get("effort") or "").strip().lower()
             enabled = reasoning_config.get("enabled", True)
             if enabled is not False and effort and effort != "none":
-                extra_body["chat_template_kwargs"] = {"reasoning_effort": effort}
+                wire_effort: str | None = effort
+                base_url = context.get("base_url") or self.base_url
+                if base_url:
+                    try:
+                        from . import probe
+
+                        result = probe.probe_model(base_url, context.get("model"))
+                        wire_effort = _clamp_effort(effort, result.caps)
+                    except Exception as exc:
+                        logger.debug(
+                            "llamacpp effort clamp skipped (probe failed): %s", exc
+                        )
+                if wire_effort != effort:
+                    logger.info(
+                        "llamacpp: reasoning_effort %r -> %s (served template)",
+                        effort,
+                        wire_effort if wire_effort else "omitted",
+                    )
+                if wire_effort:
+                    extra_body["chat_template_kwargs"] = {
+                        "reasoning_effort": wire_effort
+                    }
         return extra_body, top_level
 
     def probe_server_caps(self, *, base_url=None, model=None, timeout=3.0):
