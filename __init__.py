@@ -195,6 +195,13 @@ class LlamaCppProfile(ProviderProfile):
     # loads against a stock core that lacks the base-class field.
     echo_reasoning_content = True
 
+    # llama-server attaches a server-side ``timings`` block to completed
+    # responses (final SSE chunk on the streaming path). Core surfaces the
+    # server's own tokens-per-second only for profiles carrying
+    # this opt-in; a plain class attr, so the plugin still loads against a
+    # stock core that ignores the field.
+    surfaces_server_timings = True
+
     def build_api_kwargs_extras(
         self,
         *,
