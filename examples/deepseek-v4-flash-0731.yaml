@@ -1,11 +1,11 @@
-# Worked example: DeepSeek V4 Flash 0731 served by llama-swap.
+# Example: DeepSeek V4 Flash 0731 served by llama-swap.
 #
 # Copy this content into a fresh ~/.hermes/config.yaml and adjust the
 # api URL. The model id must match your llama-swap config entry (here:
 # deepseek-v4-flash-0731-iq3s).
 #
-# Validated live against the rig entry deepseek-v4-flash-0731-iq3s
-# (llama.cpp build b10285). Its chat template consults reasoning_effort
+# Validated live against a llama-swap deployment serving
+# deepseek-v4-flash-0731-iq3s (llama.cpp build b10285). Its chat template consults reasoning_effort
 # in a form the probe cannot verify membership for, so a configured
 # effort is omitted from the wire rather than risking a template error.
 # The enable_thinking toggle is honored, which is what this example

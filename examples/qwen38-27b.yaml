@@ -1,11 +1,12 @@
-# Worked example: Qwen3.8 27B MTP (thinking) served by llama-swap.
+# Example: Qwen3.8 27B MTP (thinking) served by llama-swap.
 #
 # Copy this content into a fresh ~/.hermes/config.yaml and adjust the
 # api URL to your endpoint. The model id must match your llama-swap
 # config entry (here: qwen38-27b-mtp-q8).
 #
-# Validated live against the rig entry qwen38-27b-mtp-q8 (llama.cpp
-# build b10433). Its chat template accepts reasoning_effort low, medium
+# Validated live against a llama-swap deployment serving
+# qwen38-27b-mtp-q8 (llama.cpp build b10433). Its chat template
+# accepts reasoning_effort low, medium
 # and xhigh, remaps high to xhigh, defaults to xhigh, and honors the
 # enable_thinking toggle.
 #

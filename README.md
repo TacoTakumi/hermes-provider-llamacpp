@@ -34,6 +34,36 @@ What it adds over the generic custom provider:
   on llama-swap exactly like a real first turn would - that is the
   point, but it is why the gate is strict (boolean true only).
 
+## Install
+
+Requires a hermes-agent build that carries the provider-profile hook
+points this plugin activates. Until they land upstream, use the
+companion branch:
+
+    https://github.com/TacoTakumi/hermes-agent/tree/llamacpp-provider
+
+Then install the plugin as a user plugin (no dependencies, no build
+step - hermes discovers it on start):
+
+    git clone https://github.com/TacoTakumi/hermes-provider-llamacpp \
+        ~/.hermes/plugins/model-providers/llamacpp
+
+Alternatively, bundle it into a hermes checkout by copying the plugin
+directory to <checkout>/plugins/model-providers/llamacpp - both
+placements register the identical provider.
+
+Point it at your server and pick a model:
+
+    model:
+      default: <model-id>
+      provider: llamacpp
+    providers:
+      llamacpp:
+        api: http://<host>:<port>/v1
+
+No API key is needed. See Examples for complete configs including
+reasoning control.
+
 ## Config surface
 
     providers.llamacpp.api              endpoint base URL (.../v1)
@@ -49,11 +79,13 @@ What it adds over the generic custom provider:
 The legacy custom_providers list form (entries with base_url and a
 models list) normalizes to the same surface.
 
-## Worked examples
+## Examples
 
     examples/qwen38-27b.yaml              thinking model behind llama-swap
     examples/deepseek-v4-flash-0731.yaml  DeepSeek V4 Flash 0731
 
 Copy an example into a fresh config.yaml, adjust the api URL, and start
-hermes. Each example documents the request-body effects to expect; both
-were validated live against the rig through a capture proxy.
+hermes. Each example documents the request-body effects to expect. Both
+configs were validated against a live llama-swap deployment, with the
+request bodies captured through a local proxy to confirm what actually
+reaches the server.
