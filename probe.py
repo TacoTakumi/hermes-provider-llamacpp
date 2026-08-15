@@ -6,16 +6,13 @@ Server kinds:
 - "llama-server": /running answers 404 (bare llama-server has no such route)
 - "unknown":      endpoint unreachable or unrecognized
 
-Template capabilities come from /props: the served chat template names the
-reasoning_effort values it accepts (membership tests), values it remaps
-(e.g. qwen38 turns 'high' into 'xhigh' before its check), a default, and
-whether it honors the enable_thinking toggle.
+Template capabilities come from /props: accepted reasoning_effort values,
+values the template remaps, its default, and the enable_thinking toggle.
 
 SAFETY: on llama-swap every model-dispatched route STARTS a non-resident
-model - /props?model= included (llama-swap internal/server/server.go lists
-/props in modelGetRoutes, dispatched through the same localPeerHandler as
-chat completions). fetch_props therefore only queries /props for ids
-present in /running; a non-resident id yields None with no HTTP request.
+model - /props?model= included. fetch_props therefore only queries /props
+for ids present in /running; a non-resident id yields None with no HTTP
+request.
 """
 
 from __future__ import annotations

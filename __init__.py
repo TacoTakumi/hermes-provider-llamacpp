@@ -1,15 +1,10 @@
 """llama.cpp / llama-swap provider profile (user plugin).
 
 Registers the ``llamacpp`` provider so llama.cpp endpoints - a bare
-``llama-server`` or a llama-swap proxy in front of one - get their own
-profile instead of riding the generic ``custom`` profile. The bundled
-``custom`` profile lists ``llamacpp`` among its aliases; user plugins
-register after bundled ones (last-writer-wins), so the self-claimed
-``llamacpp`` alias below repoints that lookup at this profile. Removing
-this plugin directory restores stock resolution to ``custom``.
-
-Skeleton stage: registration and identity only. Server probing,
-reasoning-control emission, and discovery hooks land in later tasks.
+``llama-server`` or a llama-swap proxy - get their own profile instead
+of riding the generic ``custom`` profile. User plugins register after
+bundled ones, so the self-claimed alias repoints the lookup here.
+Removing this plugin directory restores stock resolution.
 """
 
 import json
@@ -73,18 +68,16 @@ def _model_entry_meta(base_url: str | None, model: str | None) -> dict[str, Any]
 
         providers:
           llamacpp:
-            api: http://rig:8080/v1
+            api: http://192.168.1.10:8080/v1
             models:
               qwen38-27b-mtp-q8:
                 chat_template_kwargs: {my_template_var: true}
                 reasoning_budget_tokens: 4096
-              gemma-4-27b: {}
 
-    (the legacy ``custom_providers`` list form, including
-    ``models: [{id: ..., chat_template_kwargs: {...}}]`` rows, normalizes
-    to the same shape). The entry is matched by base_url, the model by
-    its catalog key, both case-insensitive. Never mutate the result - it
-    may alias load_config_readonly()'s shared cache.
+    The legacy ``custom_providers`` list form normalizes to the same
+    shape. Entry matched by base_url, model by catalog key, both
+    case-insensitive. Never mutate the result - it may alias
+    load_config_readonly()'s shared cache.
     """
     if not base_url or not model:
         return {}
@@ -225,23 +218,13 @@ class LlamaCppProfile(ProviderProfile):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Route hermes reasoning effort to llama-server's chat template.
 
-        llama-server reads reasoning controls from the request's top-level
-        ``chat_template_kwargs`` (Jinja variables for the served template);
-        the OpenAI SDK merges extra_body into the JSON body top level, so
-        the mapping goes through extra_body, never an OpenAI parameter.
-        Thinking-off (enable_thinking=false) is wired separately.
-
-        Per-model chat_template_kwargs from hermes config merge
-        BENEATH the reasoning keys computed here: reserved keys in the
-        passthrough are dropped, so the template-aware mapping can never
-        be bypassed from that channel.
-
-        A configured reasoning budget is emitted as the
-        top-level request field reasoning_budget_tokens (llama-server
-        derives the thinking tags from the chat template server-side),
-        gated on the server build being confirmed >= the build that
-        added the field - a cold llama-swap model or unreachable /props
-        omits it rather than risking a rejected request.
+        Reasoning controls ride ``chat_template_kwargs`` via extra_body,
+        never an OpenAI parameter. Per-model kwargs from config merge
+        BENEATH the reasoning keys (reserved keys dropped), so the
+        template-aware mapping cannot be bypassed. A reasoning budget is
+        emitted top-level, gated on the server build confirming support -
+        a cold model or unreachable /props omits it rather than risking a
+        rejected request.
         """
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
@@ -378,15 +361,11 @@ class LlamaCppProfile(ProviderProfile):
     ):
         """Prime the server's prompt cache with the session preamble.
 
-        Sends one minimal completion carrying the system prompt plus the
-        same profile extras a real request would (chat_template_kwargs,
-        reasoning budget), so the server-rendered prefix matches the first
-        user turn and its prompt processing shrinks to the volatile tail.
-        Rides the normal request path - on llama-swap this routes (and may
-        start) *model* exactly as the session's first turn would, which is
-        the point of warming; that is why the opt-in gate is strict.
-        Returns the server-reported prompt_n, or None on any failure.
-        Never raises.
+        One minimal completion with the system prompt plus the same
+        profile extras a real request carries, so the rendered prefix
+        matches the first user turn. On llama-swap this may START
+        *model*, exactly like a first turn - hence the strict opt-in.
+        Returns the server-reported prompt_n, or None. Never raises.
         """
         base = str(base_url or self.base_url or "").strip().rstrip("/")
         if not base or not model or not system_prompt:
