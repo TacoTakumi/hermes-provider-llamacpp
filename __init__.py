@@ -12,8 +12,10 @@ Skeleton stage: registration and identity only. Server probing,
 reasoning-control emission, and discovery hooks land in later tasks.
 """
 
+import json
 import logging
 import re
+import urllib.request
 from typing import Any
 
 from providers import register_provider
@@ -178,6 +180,19 @@ def _config_reasoning_budget(
         )
         return None
     return raw
+
+
+def _config_prompt_warmer(base_url: str | None, model: str | None) -> bool:
+    """Opt-in prompt warmer flag, default off.
+
+    The per-model metadata value wins over the session-wide
+    ``agent.prompt_warmer``; anything but boolean True stays off (a
+    warm request loads the model server-side, so the gate is strict).
+    """
+    raw = _model_entry_meta(base_url, model).get("prompt_warmer")
+    if raw is None:
+        raw = _agent_config().get("prompt_warmer")
+    return raw is True
 
 
 class LlamaCppProfile(ProviderProfile):
@@ -346,6 +361,83 @@ class LlamaCppProfile(ProviderProfile):
         if server.kind != "llama-swap":
             return None
         return server.running
+
+    def prompt_warmer_enabled(self, *, base_url=None, model=None) -> bool:
+        """True when the opt-in prompt warmer flag is set."""
+        return _config_prompt_warmer(base_url or self.base_url, model)
+
+    def warm_prompt_cache(
+        self,
+        *,
+        base_url=None,
+        model=None,
+        system_prompt="",
+        tools=None,
+        reasoning_config=None,
+        timeout=900.0,
+    ):
+        """Prime the server's prompt cache with the session preamble.
+
+        Sends one minimal completion carrying the system prompt plus the
+        same profile extras a real request would (chat_template_kwargs,
+        reasoning budget), so the server-rendered prefix matches the first
+        user turn and its prompt processing shrinks to the volatile tail.
+        Rides the normal request path - on llama-swap this routes (and may
+        start) *model* exactly as the session's first turn would, which is
+        the point of warming; that is why the opt-in gate is strict.
+        Returns the server-reported prompt_n, or None on any failure.
+        Never raises.
+        """
+        base = str(base_url or self.base_url or "").strip().rstrip("/")
+        if not base or not model or not system_prompt:
+            return None
+        try:
+            extra_body, top_level = self.build_api_kwargs_extras(
+                reasoning_config=reasoning_config,
+                model=model,
+                base_url=base,
+            )
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "system", "content": system_prompt}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            if isinstance(tools, list) and tools:
+                # The chat template renders tool definitions into the early
+                # prompt region; without them the warmed prefix diverges
+                # from the first real turn within its first tokens and the
+                # server reuses nothing.
+                body["tools"] = tools
+            body.update(top_level)
+            body.update(extra_body)
+            url = base + (
+                "/chat/completions"
+                if base.endswith("/v1")
+                else "/v1/chat/completions"
+            )
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read())
+            prompt_n = None
+            if isinstance(payload, dict):
+                timings = payload.get("timings")
+                if isinstance(timings, dict):
+                    prompt_n = timings.get("prompt_n")
+            logger.info(
+                "llamacpp: prompt warmer primed %s (prompt_n=%s)",
+                model,
+                prompt_n,
+            )
+            return prompt_n
+        except Exception as exc:
+            logger.info("llamacpp: prompt warmer failed for %s: %s", model, exc)
+            return None
 
 
 llamacpp = LlamaCppProfile(
