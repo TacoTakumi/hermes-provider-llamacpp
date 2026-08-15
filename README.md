@@ -61,8 +61,13 @@ Point it at your server and pick a model:
       llamacpp:
         api: http://<host>:<port>/v1
 
-No API key is needed. See Examples for complete configs including
-reasoning control.
+Or configure only the providers block and select interactively:
+
+    hermes model
+
+The llamacpp provider row lists the server's live model catalog;
+picking a model writes the selection to your config. No API key is
+needed. See Examples for complete configs including reasoning control.
 
 ## Config surface
 
